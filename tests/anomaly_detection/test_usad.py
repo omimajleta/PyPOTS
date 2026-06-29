@@ -49,7 +49,6 @@ class TestUSAD(unittest.TestCase):
             d_model=32,
             epochs=5,
             batch_size=32,
-            verbose=False,
         )
 
     def test_01_fit(self):

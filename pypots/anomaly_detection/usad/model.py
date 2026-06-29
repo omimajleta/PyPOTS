@@ -109,22 +109,16 @@ class USAD(BaseNNDetector):
         Batch size for training. Default is 32.
     epochs : int
         Number of training epochs. Default is 100.
-    patience : int, optional
-        Early stopping patience. Default is None.
     training_loss : Criterion or type
         Loss function for training. Default is MAE.
     validation_metric : Criterion or type
         Metric for validation. Default is MSE.
     optimizer : Optimizer or type
         Optimizer for training. Default is Adam.
-    num_workers : int
-        Number of workers for data loading. Default is 0.
     device : str or torch.device or list, optional
         Device to use for training. Default is None (auto-select).
     saving_path : str, optional
         Path to save the model. Default is None.
-    model_saving_strategy : str, optional
-        Strategy for saving the model. Default is "best".
     verbose : bool
         Whether to print training progress. Default is True.
     """
@@ -138,15 +132,11 @@ class USAD(BaseNNDetector):
         dropout: float = 0.1,
         batch_size: int = 32,
         epochs: int = 100,
-        patience: Optional[int] = None,
         training_loss: Union[Criterion, type] = MAE,
         validation_metric: Union[Criterion, type] = MSE,
         optimizer: Union[Optimizer, type] = Adam,
-        num_workers: int = 0,
         device: Optional[Union[str, torch.device, list]] = None,
         saving_path: str = None,
-        model_saving_strategy: Optional[str] = "best",
-        verbose: bool = True,
     ):
         super().__init__(
             anomaly_rate=anomaly_rate,
@@ -154,12 +144,8 @@ class USAD(BaseNNDetector):
             validation_metric=validation_metric,
             batch_size=batch_size,
             epochs=epochs,
-            patience=patience,
-            num_workers=num_workers,
             device=device,
             saving_path=saving_path,
-            model_saving_strategy=model_saving_strategy,
-            verbose=verbose,
         )
 
         self.n_steps = n_steps
