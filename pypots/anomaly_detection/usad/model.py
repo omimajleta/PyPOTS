@@ -23,8 +23,64 @@ from pypots.optim.adam import Adam
 from pypots.optim.base import Optimizer
 
 
+class _USADEncoder(nn.Module):
+    """Shared encoder used by both AE1 and AE2 in USAD.
+
+    Parameters
+    ----------
+    input_dim : int
+        Flattened input dimension (n_steps * n_features).
+    d_model : int
+        Dimensionality of the encoder output layer.
+    dropout : float
+        Dropout rate.
+    """
+
+    def __init__(self, input_dim: int, d_model: int, dropout: float = 0.1):
+        super().__init__()
+        self.encoder = nn.Sequential(
+            nn.Linear(input_dim, d_model),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_model, d_model // 2),
+            nn.ReLU(),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.encoder(x)
+
+
+class _USADDecoder(nn.Module):
+    """Individual decoder for AE1 or AE2 in USAD.
+
+    Parameters
+    ----------
+    input_dim : int
+        Flattened output dimension (n_steps * n_features).
+    d_model : int
+        Dimensionality of the encoder output layer.
+    dropout : float
+        Dropout rate.
+    """
+
+    def __init__(self, input_dim: int, d_model: int, dropout: float = 0.1):
+        super().__init__()
+        self.decoder = nn.Sequential(
+            nn.Linear(d_model // 2, d_model),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_model, input_dim),
+        )
+
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        return self.decoder(z)
+
+
 class _USADNetwork(nn.Module):
-    """The core autoencoder network used in USAD.
+    """The USAD network with a shared encoder and two separate decoders.
+
+    As described in the original paper, AE1 and AE2 share the same encoder
+    but have independent decoders.
 
     Parameters
     ----------
@@ -50,23 +106,15 @@ class _USADNetwork(nn.Module):
         self.n_features = n_features
         self.input_dim = n_steps * n_features
 
-        self.encoder = nn.Sequential(
-            nn.Linear(self.input_dim, d_model),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(d_model, d_model // 2),
-            nn.ReLU(),
-        )
+        # Shared encoder between AE1 and AE2
+        self.encoder = _USADEncoder(self.input_dim, d_model, dropout)
 
-        self.decoder = nn.Sequential(
-            nn.Linear(d_model // 2, d_model),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(d_model, self.input_dim),
-        )
+        # Separate decoders for AE1 and AE2
+        self.decoder1 = _USADDecoder(self.input_dim, d_model, dropout)
+        self.decoder2 = _USADDecoder(self.input_dim, d_model, dropout)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass through the autoencoder.
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        """Encode input through the shared encoder.
 
         Parameters
         ----------
@@ -76,14 +124,39 @@ class _USADNetwork(nn.Module):
         Returns
         -------
         torch.Tensor
-            Reconstructed tensor of shape [batch_size, n_steps, n_features].
+            Latent representation of shape [batch_size, d_model // 2].
         """
         batch_size = x.shape[0]
         x_flat = x.view(batch_size, -1)
-        z = self.encoder(x_flat)
-        x_hat_flat = self.decoder(z)
-        x_hat = x_hat_flat.view(batch_size, self.n_steps, self.n_features)
-        return x_hat
+        return self.encoder(x_flat)
+
+    def decode1(self, z: torch.Tensor, batch_size: int) -> torch.Tensor:
+        """Decode latent representation using Decoder 1 (AE1)."""
+        return self.decoder1(z).view(batch_size, self.n_steps, self.n_features)
+
+    def decode2(self, z: torch.Tensor, batch_size: int) -> torch.Tensor:
+        """Decode latent representation using Decoder 2 (AE2)."""
+        return self.decoder2(z).view(batch_size, self.n_steps, self.n_features)
+
+    def forward(self, x: torch.Tensor):
+        """Forward pass returning both AE1 and AE2 reconstructions.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input tensor of shape [batch_size, n_steps, n_features].
+
+        Returns
+        -------
+        tuple of (torch.Tensor, torch.Tensor)
+            x_hat1: reconstruction from AE1 (shared encoder + decoder1)
+            x_hat2: reconstruction from AE2 (shared encoder + decoder2)
+        """
+        batch_size = x.shape[0]
+        z = self.encode(x)
+        x_hat1 = self.decode1(z, batch_size)
+        x_hat2 = self.decode2(z, batch_size)
+        return x_hat1, x_hat2
 
 
 class USAD(BaseNNDetector):
@@ -153,20 +226,13 @@ class USAD(BaseNNDetector):
         self.d_model = d_model
         self.dropout = dropout
 
-        self.ae1 = _USADNetwork(
+        # Shared encoder + two separate decoders as per the original USAD paper
+        self.model = _USADNetwork(
             n_steps=self.n_steps,
             n_features=self.n_features,
             d_model=self.d_model,
             dropout=self.dropout,
         )
-        self.ae2 = _USADNetwork(
-            n_steps=self.n_steps,
-            n_features=self.n_features,
-            d_model=self.d_model,
-            dropout=self.dropout,
-        )
-
-        self.model = nn.ModuleList([self.ae1, self.ae2])
         self._send_model_to_given_device()
         self._print_model_size()
 
@@ -225,16 +291,14 @@ class USAD(BaseNNDetector):
         )
 
         for epoch in range(1, self.epochs + 1):
-            self.ae1.train()
-            self.ae2.train()
+            self.model.train()
             epoch_loss = 0.0
 
             for raw_batch in train_loader:
                 inputs = self._assemble_input_for_training(raw_batch)
                 x = inputs["X"]
 
-                x_hat1 = self.ae1(x)
-                x_hat2 = self.ae2(x_hat1)
+                x_hat1, x_hat2 = self.model(x)
 
                 loss1 = self.training_loss(x, x_hat1)
                 loss2 = self.training_loss(x, x_hat2)
@@ -287,16 +351,14 @@ class USAD(BaseNNDetector):
             num_workers=self.num_workers,
         )
 
-        self.ae1.eval()
-        self.ae2.eval()
+        self.model.eval()
         all_scores = []
 
         with torch.no_grad():
             for raw_batch in test_loader:
                 inputs = self._assemble_input_for_testing(raw_batch)
                 x = inputs["X"]
-                x_hat1 = self.ae1(x)
-                x_hat2 = self.ae2(x_hat1)
+                _, x_hat2 = self.model(x)
                 scores = torch.mean((x - x_hat2) ** 2, dim=(1, 2))
                 all_scores.append(scores.cpu().numpy())
 
